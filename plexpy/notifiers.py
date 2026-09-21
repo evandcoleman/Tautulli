@@ -89,7 +89,10 @@ AGENT_IDS = {'growl': 0,
              'lunasea': 27,
              'microsoftteams': 28,
              'gotify': 29,
-             'ntfy': 30
+             'ntfy': 30,
+             # Local-only agent; keep this out-of-band to avoid upstream ID collisions.
+             # The production database is migrated to use this ID.
+             'mailgun': 100
              }
 
 DEFAULT_CUSTOM_CONDITIONS = [{'parameter': '', 'operator': '', 'value': [], 'type': None}]
@@ -177,6 +180,12 @@ def available_notification_agents():
                'name': 'lunasea',
                'id': AGENT_IDS['lunasea'],
                'class': LUNASEA,
+               'action_types': ('all',)
+               },
+              {'label': 'Mailgun',
+               'name': 'mailgun',
+               'id': AGENT_IDS['mailgun'],
+               'class': MAILGUN,
                'action_types': ('all',)
                },
               {'label': 'Microsoft Teams',
@@ -2179,6 +2188,117 @@ class JOIN(Notifier):
                          ]
 
         return config_option
+
+
+class MAILGUN(Notifier):
+    """
+    Mailgun email notifications
+    """
+    NAME = 'Mailgun'
+    _DEFAULT_CONFIG = {'from_name': 'Tautulli',
+                       'from': '',
+                       'domain': '',
+                       'mailing_list_address': '',
+                       'bcc_recipients': 1,
+                       'api_key': '',
+                       'tags': '',
+                       'tracking': 0,
+                       'tracking_clicks': 0,
+                       'tracking_opens': 0,
+                       }
+
+    def agent_notify(self, subject='', body='', action='', **kwargs):
+        required_config = {
+            'api_key': 'API key',
+            'from': 'sender email address',
+            'domain': 'domain',
+            'mailing_list_address': 'recipient email address',
+        }
+        for key, label in required_config.items():
+            if not self.config[key]:
+                logger.error("Tautulli Notifiers :: %s notification failed: Missing %s",
+                             self.NAME, label)
+                return False
+
+        try:
+            response = requests.get(
+                'https://api.mailgun.net/v3/lists/{}/members'.format(self.config['mailing_list_address']),
+                auth=('api', self.config['api_key']),
+                params={'limit': 100},
+                verify=True,
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error("Tautulli Notifiers :: Unable to retrieve %s email addresses: %s", self.NAME, e)
+            return False
+
+        if response.status_code != 200:
+            logger.error("Tautulli Notifiers :: Unable to retrieve %s email addresses: [%s] %s",
+                         self.NAME, response.status_code, response.reason)
+            logger.debug("Tautulli Notifiers :: Request response: %s", request.server_message(response, True))
+            return False
+
+        try:
+            response_data = response.json()
+            email_addresses = [item['address'] for item in response_data.get('items') or [] if item.get('address')]
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.error("Tautulli Notifiers :: Unable to parse %s mailing-list members response: %s",
+                         self.NAME, e)
+            return False
+        if not email_addresses:
+            logger.error("Tautulli Notifiers :: Unable to retrieve %s email addresses: %s",
+                         self.NAME, response_data.get('message', ''))
+            return False
+
+        data = {'from': '{} <{}>'.format(self.config['from_name'], self.config['from']),
+                'subject': subject,
+                'html': body}
+        if self.config['bcc_recipients']:
+            data['bcc'] = email_addresses
+            data['to'] = self.config['from']
+        else:
+            data['to'] = email_addresses
+
+        if self.config['tags']:
+            data['o:tag'] = self.config['tags']
+        if self.config['tracking']:
+            data['o:tracking'] = 'yes'
+        if self.config['tracking_clicks']:
+            data['o:tracking-clicks'] = 'yes'
+        if self.config['tracking_opens']:
+            data['o:tracking-opens'] = 'yes'
+
+        return self.make_request(
+            'https://api.mailgun.net/v3/{}/messages'.format(self.config['domain']),
+            auth=('api', self.config['api_key']),
+            data=data,
+            verify=True,
+        )
+
+    def _return_config_options(self):
+        return [{'label': 'From Name', 'value': self.config['from_name'], 'name': 'mailgun_from_name',
+                 'description': 'The name of the sender.', 'input_type': 'text'},
+                {'label': 'From', 'value': self.config['from'], 'name': 'mailgun_from',
+                 'description': 'The email address of the sender.', 'input_type': 'text'},
+                {'label': 'Domain', 'value': self.config['domain'], 'name': 'mailgun_domain',
+                 'description': 'The domain to send from.', 'input_type': 'text'},
+                {'label': 'Mailing List Address', 'value': self.config['mailing_list_address'],
+                 'name': 'mailgun_mailing_list_address',
+                 'description': 'The email address of the mailing list on Mailgun.', 'input_type': 'text'},
+                {'label': 'BCC Recipients', 'value': self.config['bcc_recipients'],
+                 'name': 'mailgun_bcc_recipients', 'description': 'Add users to Bcc instead of To.',
+                 'input_type': 'checkbox'},
+                {'label': 'API Key', 'value': self.config['api_key'], 'name': 'mailgun_api_key',
+                 'description': 'API key for Mailgun.', 'input_type': 'password'},
+                {'label': 'Tags', 'value': self.config['tags'], 'name': 'mailgun_tags',
+                 'description': 'Comma separated list of tags.', 'input_type': 'text'},
+                {'label': 'Tracking', 'value': self.config['tracking'], 'name': 'mailgun_tracking',
+                 'description': 'Enable tracking.', 'input_type': 'checkbox'},
+                {'label': 'Tracking Clicks', 'value': self.config['tracking_clicks'],
+                 'name': 'mailgun_tracking_clicks', 'description': 'Enable click tracking.',
+                 'input_type': 'checkbox'},
+                {'label': 'Tracking Opens', 'value': self.config['tracking_opens'],
+                 'name': 'mailgun_tracking_opens', 'description': 'Enable open tracking.',
+                 'input_type': 'checkbox'}]
 
 
 class LUNASEA(Notifier):
